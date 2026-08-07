@@ -1,0 +1,10 @@
+streamlit
+lanchain-community
+langchain-groq
+langchain-text-splitters
+chromadb
+sentence-transformers
+pymupdf
+markdownify
+pypdf
+docx2txt
