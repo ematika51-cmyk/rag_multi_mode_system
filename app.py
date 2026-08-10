@@ -1,9 +1,9 @@
 import os
-import fitz  # PyMuPDF
+import fitz 
 import markdownify
 import streamlit as st
 
-from langchain_community.document_loaders import Docx2txtLoader
+from langchain_community.document_loaders import Docx2txtLoader, DirectoryLoader
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
@@ -11,103 +11,134 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_groq import ChatGroq
 from langchain_core.prompts import PromptTemplate
 
-# Page Setup
-st.set_page_config(page_title="RAG Multi-Mode System", page_icon="⚡", layout="wide")
+# Page Configuration
+st.set_page_config(page_title="RAG Multi-Mode System", layout="wide")
 
-st.title("⚡ RAG System (PDF-to-Markdown Ingestion & Dual-Mode)")
+st.title("RAG System (Directory Ingestion & Dual-Mode)")
 
-# Embeddings & Chroma Path
+# Embeddings & Chroma Path Setup
 embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 PERSIST_DIR = "./chroma_db"
+FOLDER_PATH = "./my_files"
 
-# Sidebar Configuration
-st.sidebar.header("⚙️ Configuration")
-user_groq_key = st.sidebar.text_input("Groq API Key", type="password", help="Paste your gsk_... key here")
+# Sidebar Setup
+st.sidebar.header("Configuration")
+user_groq_key = st.sidebar.text_input("Groq API Key", type="password", help="Enter your gsk_... key")
 
-# --- TOGGLE SWITCH ---
 st.sidebar.markdown("---")
-st.sidebar.header("🔀 Mode Selection")
+st.sidebar.header("Mode Selection")
 enable_style_mimic = st.sidebar.toggle("Enable Style Mimicking Mode", value=False)
 
 if enable_style_mimic:
-    st.sidebar.info("🎭 Mode Active: Style Mimicking\nGenerates content matching the tone & style of the document.")
+    st.sidebar.info("Mode: Style Mimicking\nGenerates response matching the document's tone and style.")
 else:
-    st.sidebar.info("🎯 Mode Active: Standard QA\nDirect RAG retrieval & precise factual answers.")
+    st.sidebar.info("Mode: Standard QA\nProvides direct and precise factual answers.")
 
 
-# --- FUNCTION: CONVERT PDF TO MARKDOWN ---
-def convert_pdf_to_markdown(pdf_path):
-    doc = fitz.open(pdf_path)
-    full_markdown = ""
-    for page_num in range(len(doc)):
-        page = doc[page_num]
-        html_content = page.get_text("html")
-        md_text = markdownify.markdownify(html_content, heading_style="ATX")
-        full_markdown += f"\n\n<!-- Page {page_num + 1} -->\n\n" + md_text
-    return full_markdown
+def load_pdfs_as_markdown(folder_path):
+    documents = []
+    if not os.path.exists(folder_path):
+        return documents
+
+    # Cover page indicators filter out karne ke liye words
+    ignore_keywords = ["SUBMITTED TO", "SUBMITTED BY", "REG NO", "COMSATS UNIVERSITY", "ATTOCK CAMPUS"]
+
+    for file_name in os.listdir(folder_path):
+        if file_name.endswith(".pdf"):
+            pdf_path = os.path.join(folder_path, file_name)
+            doc = fitz.open(pdf_path)
+            full_markdown = ""
+            
+            for page_num in range(len(doc)):
+                page = doc[page_num]
+                html_content = page.get_text("html")
+                md_text = markdownify.markdownify(html_content, heading_style="ATX")
+                
+                # Check agar pehla page cover/title page hai to usay ignore karein
+                upper_md = md_text.upper()
+                is_cover_page = sum(1 for kw in ignore_keywords if kw in upper_md) >= 2
+                
+                if not is_cover_page:
+                    full_markdown += f"\n\n<!-- Page {page_num + 1} -->\n\n" + md_text
+
+            if full_markdown.strip():
+                documents.append(
+                    Document(page_content=full_markdown, metadata={"source": file_name, "format": "markdown"})
+                )
+    return documents
 
 
-# --- DOCUMENT INGESTION FUNCTION ---
-def setup_vector_database():
+@st.cache_resource(show_spinner=False)
+def setup_vector_database(folder_path):
+    if not os.path.exists(folder_path) or len(os.listdir(folder_path)) == 0:
+        return None, 0, f"Error: '{folder_path}' folder is empty or not found."
+
     docs = []
-    file_name = ""
-    file_type = ""
+    
+    # 1. Load PDFs (Filtered)
+    pdf_docs = load_pdfs_as_markdown(folder_path)
+    docs.extend(pdf_docs)
 
-    if os.path.exists("sample.pdf"):
-        file_name = "sample.pdf"
-        file_type = "PDF (Converted to Markdown)"
-        # PDF ko Markdown text mein badlein
-        md_text = convert_pdf_to_markdown(file_name)
-        docs = [Document(page_content=md_text, metadata={"source": file_name, "format": "markdown"})]
-    elif os.path.exists("sample.docx"):
-        file_name = "sample.docx"
-        file_type = "DOCX Ingestion"
-        loader = Docx2txtLoader(file_name)
-        docs = loader.load()
-    else:
-        return None, 0, "Error: 'sample.pdf' ya 'sample.docx' file nahi mili!", "", ""
+    # 2. Load DOCX
+    try:
+        docx_loader = DirectoryLoader(folder_path, glob="**/*.docx", loader_cls=Docx2txtLoader)
+        docx_docs = docx_loader.load()
+        docs.extend(docx_docs)
+    except Exception:
+        pass
 
-    # Chunking
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+    if not docs:
+        return None, 0, f"Error: No valid PDF or DOCX files found in '{folder_path}'."
+
+    # Optimal Chunking Strategy for Academic Notes
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=200)
     chunks = text_splitter.split_documents(docs)
 
-    # Vector DB Storage
-    vector_db = Chroma.from_documents(chunks, embeddings, persist_directory=PERSIST_DIR)
-    return vector_db, len(chunks), None, file_name, file_type
+    # Clean any accidental remaining metadata chunks
+    cleaned_chunks = []
+    for chunk in chunks:
+        content_upper = chunk.page_content.upper()
+        if not ("SUBMITTED TO" in content_upper and "REG NO" in content_upper):
+            cleaned_chunks.append(chunk)
+
+    # Vector Store Storage
+    vector_db = Chroma.from_documents(cleaned_chunks, embeddings, persist_directory=PERSIST_DIR)
+    return vector_db, len(cleaned_chunks), None
 
 
-# Process Document
-with st.spinner("Processing document into Markdown & setting up Vector DB..."):
-    vector_db, num_chunks, err, active_file, active_type = setup_vector_database()
+# Initialize Database
+with st.spinner("Processing documents from 'my_files'..."):
+    vector_db, num_chunks, err = setup_vector_database(FOLDER_PATH)
 
 if err:
     st.sidebar.error(err)
 else:
-    st.sidebar.success(f"✅ Loaded: `{active_file}`")
-    st.sidebar.caption(f"Method: {active_type} | Total Chunks: {num_chunks}")
+    st.sidebar.success(f"Status: Ready | Total Chunks: {num_chunks}")
 
 
-# --- MAIN UI & QUERY ---
+# Main Query Interface
 input_label = "Enter Topic for Paragraph Generation:" if enable_style_mimic else "Enter Question for Standard RAG QA:"
-user_input = st.text_input(input_label, placeholder="e.g., What is Retrieval Augmented Generation?")
+user_input = st.text_input(input_label, placeholder="Type here...")
 
-if st.button("🚀 Process Request", type="primary"):
+if st.button("Submit", type="primary"):
     if not user_groq_key.strip():
-        st.error("⚠️ Please paste a valid Groq API Key (starts with gsk_) in the sidebar!")
+        st.error("Please enter a valid Groq API Key in the sidebar.")
     elif not user_input.strip():
-        st.warning("Please enter a query or topic first.")
+        st.warning("Please enter a query or topic.")
     elif vector_db is None:
         st.error("Vector database is not initialized.")
     else:
-        with st.spinner("Retrieving context and generating output..."):
+        with st.spinner("Retrieving context and generating response..."):
             try:
-                retriever = vector_db.as_retriever(search_kwargs={"k": 2})
+                # Top 5 most relevant chunks (Fixed from k=100)
+                retriever = vector_db.as_retriever(search_kwargs={"k": 8})
                 retrieved_docs = retriever.invoke(user_input)
                 context_text = "\n\n".join([doc.page_content for doc in retrieved_docs])
 
-                with st.expander(f"🔍 View Retrieved Reference Chunks from {active_file}"):
+                with st.expander("View Retrieved Context Chunks"):
                     for i, doc in enumerate(retrieved_docs, 1):
-                        st.markdown(f"**Chunk {i}:**")
+                        source_name = doc.metadata.get("source", "Unknown Source")
+                        st.markdown(f"**Chunk {i} (Source: {source_name}):**")
                         st.text(doc.page_content)
                         st.divider()
 
@@ -126,7 +157,7 @@ if st.button("🚀 Process Request", type="primary"):
                         Write a paragraph on the topic: "{topic}"
                         
                         INSTRUCTION:
-                        Match the EXACT writing style, tone, and language mix (e.g. Roman Urdu / English) of the context below.
+                        Match the exact writing style, tone, and language mix of the context below.
                         
                         CONTEXT:
                         ---
@@ -139,12 +170,12 @@ if st.button("🚀 Process Request", type="primary"):
                 else:
                     prompt = PromptTemplate.from_template(
                         """
-                        You are a precise AI assistant. Answer the user question accurately based ONLY on the provided context.
+                        You are a precise AI assistant. Answer the question accurately based strictly on the provided context.
                         If the context does not contain enough information, state that clearly.
                         
                         QUESTION: {topic}
                         
-                        CONTEXT FROM DOCUMENT:
+                        CONTEXT:
                         ---
                         {context}
                         ---
@@ -156,9 +187,9 @@ if st.button("🚀 Process Request", type="primary"):
                 chain = prompt | llm
                 response = chain.invoke({"topic": user_input, "context": context_text})
 
-                output_title = "✍️ Style-Matched Output:" if enable_style_mimic else "📝 QA Output:"
+                output_title = "Style-Matched Output:" if enable_style_mimic else "QA Output:"
                 st.subheader(output_title)
                 st.write(response.content)
 
             except Exception as e:
-                st.error(f"❌ Error: {e}")
+                st.error(f"Error: {e}")
