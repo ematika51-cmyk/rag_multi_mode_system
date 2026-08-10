@@ -5,7 +5,7 @@ from langchain_groq import ChatGroq
 from langchain_core.prompts import PromptTemplate
 
 def run_rag_pipeline(user_topic):
-    # 1. Load Saved ChromaDB (Using HuggingFace Embeddings)
+
     print("Step 1: Loading Vector Database...")
     embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
     vector_db = Chroma(
@@ -13,7 +13,6 @@ def run_rag_pipeline(user_topic):
         embedding_function=embeddings
     )
 
-    # 2. Retrieve Context Based on User Topic
     print(f"\nStep 2: Retrieving context for topic '{user_topic}'...")
     retriever = vector_db.as_retriever(search_kwargs={"k": 2})
     retrieved_docs = retriever.invoke(user_topic)
@@ -21,7 +20,6 @@ def run_rag_pipeline(user_topic):
     context_text = "\n\n".join([doc.page_content for doc in retrieved_docs])
     print(f"✅ Found {len(retrieved_docs)} relevant context chunks!")
 
-    # 3. Setup Groq LLM (Paste your gsk_ key here)
     groq_api_key = ""
     
     llm = ChatGroq(
@@ -30,7 +28,6 @@ def run_rag_pipeline(user_topic):
         temperature=0.7
     )
 
-    # 4. Style Mimicking Prompt Template
     style_prompt = PromptTemplate.from_template(
         """
         You are an expert content writer and style mimicker.
@@ -51,14 +48,12 @@ def run_rag_pipeline(user_topic):
         """
     )
 
-    # 5. Run RAG Pipeline Chain
     print("\nStep 3: Groq LLM is generating text with matching writing style...\n")
     chain = style_prompt | llm
     response = chain.invoke({"topic": user_topic, "context": context_text})
 
     return response.content
 
-# --- Main Execution ---
 if __name__ == "__main__":
     user_topic = "what is vector database in RAG??"
     

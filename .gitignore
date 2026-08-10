@@ -1,2 +1,12 @@
-chroma_db/.env
-__pycache__/*.sqlite3
+# Python execution cache
+__pycache__/
+*.pyc
+
+# Environment & API keys
+.env
+
+# Vector Database (Local DBs)
+chroma_db/
+
+# Optional: Temporary uploaded files
+temp/
