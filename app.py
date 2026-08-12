@@ -1,195 +1,81 @@
 import os
-import fitz 
-import markdownify
-import streamlit as st
-
-from langchain_community.document_loaders import Docx2txtLoader, DirectoryLoader
-from langchain_core.documents import Document
+from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import Chroma
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_groq import ChatGroq
-from langchain_core.prompts import PromptTemplate
+from langchain_huggingface import HuggingFaceEmbeddings
+from sklearn.metrics.pairwise import cosine_similarity
 
-# Page Configuration
-st.set_page_config(page_title="RAG Multi-Mode System", layout="wide")
+folder_path = "./my_files"
+documents = []
 
-st.title("RAG System (Directory Ingestion & Dual-Mode)")
+print("Files load ho rahi hain...")
 
-# Embeddings & Chroma Path Setup
-embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-PERSIST_DIR = "./chroma_db"
-FOLDER_PATH = "./my_files"
-
-# Sidebar Setup
-st.sidebar.header("Configuration")
-user_groq_key = st.sidebar.text_input("Groq API Key", type="password", help="Enter your gsk_... key")
-
-st.sidebar.markdown("---")
-st.sidebar.header("Mode Selection")
-enable_style_mimic = st.sidebar.toggle("Enable Style Mimicking Mode", value=False)
-
-if enable_style_mimic:
-    st.sidebar.info("Mode: Style Mimicking\nGenerates response matching the document's tone and style.")
-else:
-    st.sidebar.info("Mode: Standard QA\nProvides direct and precise factual answers.")
-
-
-def load_pdfs_as_markdown(folder_path):
-    documents = []
-    if not os.path.exists(folder_path):
-        return documents
-
-    # Cover page indicators filter out karne ke liye words
-    ignore_keywords = ["SUBMITTED TO", "SUBMITTED BY", "REG NO", "COMSATS UNIVERSITY", "ATTOCK CAMPUS"]
-
-    for file_name in os.listdir(folder_path):
-        if file_name.endswith(".pdf"):
-            pdf_path = os.path.join(folder_path, file_name)
-            doc = fitz.open(pdf_path)
-            full_markdown = ""
+# --- STEP 1: MULTI-FORMAT DATA INGESTION ---
+if os.path.exists(folder_path):
+    for file in os.listdir(folder_path):
+        file_path = os.path.join(folder_path, file)
+        
+        # PDF files ke liye
+        if file.endswith(".pdf"):
+            loader = PyPDFLoader(file_path)
+            documents.extend(loader.load())
+            print(f"Loaded PDF: {file}")
             
-            for page_num in range(len(doc)):
-                page = doc[page_num]
-                html_content = page.get_text("html")
-                md_text = markdownify.markdownify(html_content, heading_style="ATX")
-                
-                # Check agar pehla page cover/title page hai to usay ignore karein
-                upper_md = md_text.upper()
-                is_cover_page = sum(1 for kw in ignore_keywords if kw in upper_md) >= 2
-                
-                if not is_cover_page:
-                    full_markdown += f"\n\n<!-- Page {page_num + 1} -->\n\n" + md_text
+        # DOCX files ke liye
+        elif file.endswith(".docx"):
+            loader = Docx2txtLoader(file_path)
+            documents.extend(loader.load())
+            print(f"Loaded DOCX: {file}")
 
-            if full_markdown.strip():
-                documents.append(
-                    Document(page_content=full_markdown, metadata={"source": file_name, "format": "markdown"})
-                )
-    return documents
+print(f"\nTotal {len(documents)} document pages/files load ho gayi hain.")
 
+if len(documents) > 0:
+    # --- STEP 2: TEXT CHUNKING ---
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000, 
+        chunk_overlap=150
+    )
+    chunks = text_splitter.split_documents(documents)
+    print(f"Total {len(chunks)} chunks ban chuke hain.")
 
-@st.cache_resource(show_spinner=False)
-def setup_vector_database(folder_path):
-    if not os.path.exists(folder_path) or len(os.listdir(folder_path)) == 0:
-        return None, 0, f"Error: '{folder_path}' folder is empty or not found."
+    # --- STEP 3: STYLOMETRY & STYLE GEOMETRY ---
+    print("\nEmbedding model load ho raha hai...")
+    embedding_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
-    docs = []
-    
-    # 1. Load PDFs (Filtered)
-    pdf_docs = load_pdfs_as_markdown(folder_path)
-    docs.extend(pdf_docs)
+    def get_stylometric_features(text):
+        words = text.split()
+        sentences = [s for s in text.split('.') if s.strip()]
+        avg_sentence_len = len(words) / max(len(sentences), 1)
+        unique_word_ratio = len(set(words)) / max(len(words), 1)
+        
+        return {
+            "word_count": len(words),
+            "avg_sentence_length": round(avg_sentence_len, 2),
+            "vocabulary_richness": round(unique_word_ratio, 2)
+        }
 
-    # 2. Load DOCX
-    try:
-        docx_loader = DirectoryLoader(folder_path, glob="**/*.docx", loader_cls=Docx2txtLoader)
-        docx_docs = docx_loader.load()
-        docs.extend(docx_docs)
-    except Exception:
-        pass
+    def calculate_style_similarity(ref_text, gen_text):
+        ref_vector = embedding_model.embed_query(ref_text)
+        gen_vector = embedding_model.embed_query(gen_text)
+        
+        similarity_score = cosine_similarity([ref_vector], [gen_vector])[0][0]
+        return round(float(similarity_score) * 100, 2)
 
-    if not docs:
-        return None, 0, f"Error: No valid PDF or DOCX files found in '{folder_path}'."
+    # Reference text from loaded files
+    full_reference_text = " ".join([doc.page_content for doc in documents])
 
-    # Optimal Chunking Strategy for Academic Notes
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=200)
-    chunks = text_splitter.split_documents(docs)
+    # AI Sample Output for Comparison
+    sample_generated_text = "This is a reference text sample to test stylometric similarity with uploaded files."
 
-    # Clean any accidental remaining metadata chunks
-    cleaned_chunks = []
-    for chunk in chunks:
-        content_upper = chunk.page_content.upper()
-        if not ("SUBMITTED TO" in content_upper and "REG NO" in content_upper):
-            cleaned_chunks.append(chunk)
+    # Analysis
+    ref_stats = get_stylometric_features(full_reference_text)
+    ai_stats = get_stylometric_features(sample_generated_text)
+    style_score = calculate_style_similarity(full_reference_text, sample_generated_text)
 
-    # Vector Store Storage
-    vector_db = Chroma.from_documents(cleaned_chunks, embeddings, persist_directory=PERSIST_DIR)
-    return vector_db, len(cleaned_chunks), None
-
-
-# Initialize Database
-with st.spinner("Processing documents from 'my_files'..."):
-    vector_db, num_chunks, err = setup_vector_database(FOLDER_PATH)
-
-if err:
-    st.sidebar.error(err)
+    # Output Display
+    print("\n================ RESULT ================")
+    print(f"Reference File Stats: {ref_stats}")
+    print(f"AI Output Stats: {ai_stats}")
+    print(f"Style Match Score: {style_score}%")
+    print("========================================")
 else:
-    st.sidebar.success(f"Status: Ready | Total Chunks: {num_chunks}")
-
-
-# Main Query Interface
-input_label = "Enter Topic for Paragraph Generation:" if enable_style_mimic else "Enter Question for Standard RAG QA:"
-user_input = st.text_input(input_label, placeholder="Type here...")
-
-if st.button("Submit", type="primary"):
-    if not user_groq_key.strip():
-        st.error("Please enter a valid Groq API Key in the sidebar.")
-    elif not user_input.strip():
-        st.warning("Please enter a query or topic.")
-    elif vector_db is None:
-        st.error("Vector database is not initialized.")
-    else:
-        with st.spinner("Retrieving context and generating response..."):
-            try:
-                # Top 5 most relevant chunks (Fixed from k=100)
-                retriever = vector_db.as_retriever(search_kwargs={"k": 8})
-                retrieved_docs = retriever.invoke(user_input)
-                context_text = "\n\n".join([doc.page_content for doc in retrieved_docs])
-
-                with st.expander("View Retrieved Context Chunks"):
-                    for i, doc in enumerate(retrieved_docs, 1):
-                        source_name = doc.metadata.get("source", "Unknown Source")
-                        st.markdown(f"**Chunk {i} (Source: {source_name}):**")
-                        st.text(doc.page_content)
-                        st.divider()
-
-                llm = ChatGroq(
-                    model_name="llama-3.3-70b-versatile",
-                    groq_api_key=user_groq_key.strip(),
-                    temperature=0.7 if enable_style_mimic else 0.2
-                )
-
-                if enable_style_mimic:
-                    prompt = PromptTemplate.from_template(
-                        """
-                        You are an expert content writer and style mimicker.
-                        
-                        TASK:
-                        Write a paragraph on the topic: "{topic}"
-                        
-                        INSTRUCTION:
-                        Match the exact writing style, tone, and language mix of the context below.
-                        
-                        CONTEXT:
-                        ---
-                        {context}
-                        ---
-                        
-                        GENERATED PARAGRAPH:
-                        """
-                    )
-                else:
-                    prompt = PromptTemplate.from_template(
-                        """
-                        You are a precise AI assistant. Answer the question accurately based strictly on the provided context.
-                        If the context does not contain enough information, state that clearly.
-                        
-                        QUESTION: {topic}
-                        
-                        CONTEXT:
-                        ---
-                        {context}
-                        ---
-                        
-                        ANSWER:
-                        """
-                    )
-
-                chain = prompt | llm
-                response = chain.invoke({"topic": user_input, "context": context_text})
-
-                output_title = "Style-Matched Output:" if enable_style_mimic else "QA Output:"
-                st.subheader(output_title)
-                st.write(response.content)
-
-            except Exception as e:
-                st.error(f"Error: {e}")
+    print("Error: Files load nahi ho sakeen. Path check karein.")
