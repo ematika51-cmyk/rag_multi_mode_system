@@ -2,12 +2,13 @@ import os
 import streamlit as st
 from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings, HuggingFacePipeline
 from langchain_community.vectorstores import Chroma
 from sklearn.metrics.pairwise import cosine_similarity
+from transformers import pipeline
 
-st.set_page_config(page_title="RAG Stylometry & Retrieval", layout="wide")
-st.title("📄 RAG Semantic Retrieval & Stylometry Pipeline")
+st.set_page_config(page_title="RAG Stylometry & Generation Pipeline", layout="wide")
+st.title("📄 RAG Semantic Retrieval, Stylometry & Free LLM Generation")
 
 folder_path = "./my_files"
 chroma_dir = "./chroma_db"
@@ -15,7 +16,9 @@ documents = []
 
 st.sidebar.header("Pipeline Status")
 
-# 1. Document Ingestion (Ignoring Temp Files)
+# ==========================================
+# 1. DOCUMENT INGESTION (Skipping Temp Files)
+# ==========================================
 if os.path.exists(folder_path):
     for file in os.listdir(folder_path):
         if file.startswith("~$"):
@@ -36,14 +39,19 @@ if os.path.exists(folder_path):
 if len(documents) > 0:
     st.sidebar.success(f"Loaded {len(documents)} pages/documents.")
 
-    # 2. Text Chunking
+    # ==========================================
+    # 2. TEXT CHUNKING
+    # ==========================================
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
     chunks = text_splitter.split_documents(documents)
     st.sidebar.info(f"Generated {len(chunks)} text chunks.")
 
-    # 3. Embeddings & ChromaDB Vector Store Setup
+    # ==========================================
+    # 3. EMBEDDINGS & CHROMADB VECTOR STORE SETUP (MiniLM - FREE)
+    # ==========================================
     @st.cache_resource
     def setup_vector_store(_chunks):
+        # 100% Free Local MiniLM Embeddings Model
         embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
         vectorstore = Chroma.from_documents(
             documents=_chunks, 
@@ -54,6 +62,23 @@ if len(documents) > 0:
 
     embedding_model, vectorstore = setup_vector_store(chunks)
 
+    # ==========================================
+    # 4. FREE LOCAL TEXT GENERATOR SETUP (NO API KEY)
+    # ==========================================
+    @st.cache_resource
+    def load_local_generator():
+        # Open-source free model (No OpenAI/Groq keys required)
+        pipe = pipeline(
+            "text2text-generation",
+            model="google/flan-t5-base",
+            max_new_tokens=250,
+            temperature=0.1
+        )
+        return HuggingFacePipeline(pipeline=pipe)
+
+    llm = load_local_generator()
+
+    # Stylometry helper function
     def get_stylometric_features(text):
         words = text.split()
         sentences = [s for s in text.split('.') if s.strip()]
@@ -77,21 +102,31 @@ if len(documents) > 0:
 
     st.markdown("---")
 
-    # 4. ChromaDB Vector Search
-    st.subheader("🔍 Search & Retrieval System (ChromaDB)")
+    # ==========================================
+    # 5. RETRIEVAL & GENERATION UI
+    # ==========================================
+    st.subheader("🔍 Search, Retrieval & Free Generation")
     user_query = st.text_input("Enter your question/topic:", value="Explain the concept of memory management")
 
-    if st.button("Search & Analyze"):
-        # Real ChromaDB Search
-        retrieved_docs = vectorstore.similarity_search(user_query, k=3)
+    if st.button("Search & Generate Response"):
+        with st.spinner("Retrieving from ChromaDB & Generating Answer..."):
+            # ChromaDB Vector Search (MiniLM Embeddings)
+            retrieved_docs = vectorstore.similarity_search(user_query, k=3)
+            context_text = "\n\n".join([doc.page_content for doc in retrieved_docs])
 
-        # Style Metrics Comparison
-        ref_vector = embedding_model.embed_query(full_reference_text)
-        query_vector = embedding_model.embed_query(user_query)
-        similarity_score = cosine_similarity([ref_vector], [query_vector])[0][0]
-        style_score = round(float(similarity_score) * 100, 2)
+            # Local Free Generator Prompt
+            prompt = f"Answer the following question based ONLY on the provided context.\n\nContext:\n{context_text}\n\nQuestion: {user_query}\nAnswer:"
+            generated_answer = llm.invoke(prompt)
 
-        st.subheader("🎯 Results")
+            # Style Similarity Match
+            ref_vector = embedding_model.embed_query(full_reference_text)
+            query_vector = embedding_model.embed_query(user_query)
+            similarity_score = cosine_similarity([ref_vector], [query_vector])[0][0]
+            style_score = round(float(similarity_score) * 100, 2)
+
+        st.subheader("🤖 Generated Response (Local Open-Source Model)")
+        st.success(generated_answer)
+
         st.write(f"**Query Style Similarity Match:** `{style_score}%`")
 
         st.subheader("📚 Top Retrieved Relevant Context Chunks (from ChromaDB)")
