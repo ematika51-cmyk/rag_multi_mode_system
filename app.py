@@ -1,81 +1,103 @@
 import os
+import streamlit as st
 from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.vectorstores import Chroma
 from sklearn.metrics.pairwise import cosine_similarity
 
+st.set_page_config(page_title="RAG Stylometry & Retrieval", layout="wide")
+st.title("📄 RAG Semantic Retrieval & Stylometry Pipeline")
+
 folder_path = "./my_files"
+chroma_dir = "./chroma_db"
 documents = []
 
-print("Files load ho rahi hain...")
+st.sidebar.header("Pipeline Status")
 
-# --- STEP 1: MULTI-FORMAT DATA INGESTION ---
+# 1. Document Ingestion (Ignoring Temp Files)
 if os.path.exists(folder_path):
     for file in os.listdir(folder_path):
+        if file.startswith("~$"):
+            continue
+
         file_path = os.path.join(folder_path, file)
         
-        # PDF files ke liye
-        if file.endswith(".pdf"):
-            loader = PyPDFLoader(file_path)
-            documents.extend(loader.load())
-            print(f"Loaded PDF: {file}")
-            
-        # DOCX files ke liye
-        elif file.endswith(".docx"):
-            loader = Docx2txtLoader(file_path)
-            documents.extend(loader.load())
-            print(f"Loaded DOCX: {file}")
-
-print(f"\nTotal {len(documents)} document pages/files load ho gayi hain.")
+        try:
+            if file.endswith(".pdf"):
+                loader = PyPDFLoader(file_path)
+                documents.extend(loader.load())
+            elif file.endswith(".docx"):
+                loader = Docx2txtLoader(file_path)
+                documents.extend(loader.load())
+        except Exception as e:
+            st.sidebar.warning(f"Error loading {file}: {e}")
 
 if len(documents) > 0:
-    # --- STEP 2: TEXT CHUNKING ---
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000, 
-        chunk_overlap=150
-    )
-    chunks = text_splitter.split_documents(documents)
-    print(f"Total {len(chunks)} chunks ban chuke hain.")
+    st.sidebar.success(f"Loaded {len(documents)} pages/documents.")
 
-    # --- STEP 3: STYLOMETRY & STYLE GEOMETRY ---
-    print("\nEmbedding model load ho raha hai...")
-    embedding_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+    # 2. Text Chunking
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
+    chunks = text_splitter.split_documents(documents)
+    st.sidebar.info(f"Generated {len(chunks)} text chunks.")
+
+    # 3. Embeddings & ChromaDB Vector Store Setup
+    @st.cache_resource
+    def setup_vector_store(_chunks):
+        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+        vectorstore = Chroma.from_documents(
+            documents=_chunks, 
+            embedding=embeddings,
+            persist_directory=chroma_dir
+        )
+        return embeddings, vectorstore
+
+    embedding_model, vectorstore = setup_vector_store(chunks)
 
     def get_stylometric_features(text):
         words = text.split()
         sentences = [s for s in text.split('.') if s.strip()]
         avg_sentence_len = len(words) / max(len(sentences), 1)
         unique_word_ratio = len(set(words)) / max(len(words), 1)
-        
         return {
-            "word_count": len(words),
-            "avg_sentence_length": round(avg_sentence_len, 2),
-            "vocabulary_richness": round(unique_word_ratio, 2)
+            "Word Count": len(words),
+            "Avg Sentence Length": round(avg_sentence_len, 2),
+            "Vocabulary Richness": round(unique_word_ratio, 2)
         }
 
-    def calculate_style_similarity(ref_text, gen_text):
-        ref_vector = embedding_model.embed_query(ref_text)
-        gen_vector = embedding_model.embed_query(gen_text)
-        
-        similarity_score = cosine_similarity([ref_vector], [gen_vector])[0][0]
-        return round(float(similarity_score) * 100, 2)
-
-    # Reference text from loaded files
     full_reference_text = " ".join([doc.page_content for doc in documents])
-
-    # AI Sample Output for Comparison
-    sample_generated_text = "This is a reference text sample to test stylometric similarity with uploaded files."
-
-    # Analysis
     ref_stats = get_stylometric_features(full_reference_text)
-    ai_stats = get_stylometric_features(sample_generated_text)
-    style_score = calculate_style_similarity(full_reference_text, sample_generated_text)
 
-    # Output Display
-    print("\n================ RESULT ================")
-    print(f"Reference File Stats: {ref_stats}")
-    print(f"AI Output Stats: {ai_stats}")
-    print(f"Style Match Score: {style_score}%")
-    print("========================================")
+    # UI Metrics
+    st.subheader("📊 Document Stylometry Analysis")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Total Word Count", ref_stats["Word Count"])
+    col2.metric("Avg Sentence Length", ref_stats["Avg Sentence Length"])
+    col3.metric("Vocabulary Richness", ref_stats["Vocabulary Richness"])
+
+    st.markdown("---")
+
+    # 4. ChromaDB Vector Search
+    st.subheader("🔍 Search & Retrieval System (ChromaDB)")
+    user_query = st.text_input("Enter your question/topic:", value="Explain the concept of memory management")
+
+    if st.button("Search & Analyze"):
+        # Real ChromaDB Search
+        retrieved_docs = vectorstore.similarity_search(user_query, k=3)
+
+        # Style Metrics Comparison
+        ref_vector = embedding_model.embed_query(full_reference_text)
+        query_vector = embedding_model.embed_query(user_query)
+        similarity_score = cosine_similarity([ref_vector], [query_vector])[0][0]
+        style_score = round(float(similarity_score) * 100, 2)
+
+        st.subheader("🎯 Results")
+        st.write(f"**Query Style Similarity Match:** `{style_score}%`")
+
+        st.subheader("📚 Top Retrieved Relevant Context Chunks (from ChromaDB)")
+        for i, doc in enumerate(retrieved_docs):
+            with st.expander(f"Relevant Chunk {i+1} (Source: {os.path.basename(doc.metadata.get('source', 'N/A'))})"):
+                st.write(doc.page_content)
+
 else:
-    print("Error: Files load nahi ho sakeen. Path check karein.")
+    st.error("No valid PDF or DOCX files found in './my_files' directory!")
